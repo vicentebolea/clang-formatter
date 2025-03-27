@@ -1,0 +1,88 @@
+name: Reformat PR Code
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  reformat:
+    if: ${{ github.event.issue.pull_request && contains(github.event.comment.body, '%reformat') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Get PR details
+        id: pr-data
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const prNumber = context.payload.issue.number;
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            
+            return {
+              branch: pullRequest.head.ref,
+              repo: pullRequest.head.repo.full_name,
+              sha: pullRequest.head.sha
+            };
+
+      - name: Add reaction to comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: '+1'
+            });
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ fromJSON(steps.pr-data.outputs.result).repo }}
+          ref: ${{ fromJSON(steps.pr-data.outputs.result).branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Run clang-format
+        uses: jidicula/clang-format-action@v4.11.0
+        with:
+          clang-format-version: '16'
+          check-path: '.'
+          fallback-style: 'Google'
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          if [[ -n $(git status --porcelain) ]]; then
+            git add -A
+            git commit -m "Apply clang-format [automated]"
+            git push
+            echo "Code was reformatted and changes pushed"
+          else
+            echo "No changes to commit - code already formatted"
+          fi
+
+      - name: Add comment to PR
+        if: success()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const hasChanges = `${{ steps.commit.outputs.pushed }}` === 'true';
+            const message = hasChanges 
+              ? '✅ Code has been reformatted using clang-format and changes were pushed to the branch.' 
+              : '✅ Code is already properly formatted according to clang-format standards.';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: message
+            });

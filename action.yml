@@ -1,0 +1,142 @@
+name: 'Clang Format Check'
+description: 'Check or apply clang-format using project .clang-format file'
+author: 'Vicente'
+branding:
+  icon: 'check-circle'
+  color: 'green'
+
+inputs:
+  check-only:
+    description: 'Only check formatting without modifying files'
+    required: false
+    default: 'true'
+  include-pattern:
+    description: 'File pattern to include in formatting check'
+    required: false
+    default: '*.cpp *.hpp *.c *.h'
+  exclude-pattern:
+    description: 'File pattern to exclude from formatting'
+    required: false
+    default: 'build/ third_party/'
+  github-token:
+    description: 'GitHub token for PR comments and pushes'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install clang-format
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-format
+
+    - name: Check PR comment for reformat instruction
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_comment'
+      id: check-comment
+      shell: bash
+      run: |
+        # Install GitHub CLI
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+        sudo apt update
+        sudo apt install gh -y
+
+        # Authenticate with GitHub token
+        echo "${{ inputs.github-token }}" > ./token.txt
+        gh auth login --with-token < ./token.txt
+        rm ./token.txt
+
+        # Check if PR comment contains "%reformat"
+        PR_NUM="${{ github.event.pull_request.number }}"
+        if [ -n "$PR_NUM" ]; then
+          REFORMAT_COMMENT=$(gh pr view $PR_NUM --json comments -q '.comments[].body' | grep -c "%reformat" || true)
+          if [ "$REFORMAT_COMMENT" -gt 0 ]; then
+            echo "REFORMAT=true" >> $GITHUB_ENV
+            echo "Found %reformat comment in PR. Will format and push changes."
+          else
+            echo "REFORMAT=false" >> $GITHUB_ENV
+            echo "No %reformat comment found. Will only check formatting."
+          fi
+        else
+          echo "REFORMAT=false" >> $GITHUB_ENV
+          echo "Not a PR. Will only check formatting."
+        fi
+
+    - name: Setup formatting script
+      shell: bash
+      run: |
+        cat > ${{ github.action_path }}/format.sh << 'EOL'
+        #!/bin/bash
+        set -eu
+
+        # Script to check or apply clang-format using project .clang-format file
+        CHECK_ONLY=false
+        INCLUDE_PATTERN="${{ inputs.include-pattern }}"
+        EXCLUDE_PATTERN="${{ inputs.exclude-pattern }}"
+        REFORMAT="${REFORMAT:-false}"
+
+        if [[ "${{ inputs.check-only }}" == "true" ]] && [[ "$REFORMAT" == "false" ]]; then
+          CHECK_ONLY=true
+        fi
+
+        # Find all matching files
+        FILES=$(find . -type f \( -name "*.cpp" -o -name "*.hpp" -o -name "*.c" -o -name "*.h" \) | grep -v "$EXCLUDE_PATTERN" || true)
+
+        if [ -z "$FILES" ]; then
+          echo "No files to format"
+          exit 0
+        fi
+
+        # Check if .clang-format exists
+        if [ ! -f ".clang-format" ]; then
+          echo "Error: .clang-format file not found in repository root"
+          exit 1
+        fi
+
+        if [ "$CHECK_ONLY" = true ]; then
+          # Check format only
+          echo "Checking format using project .clang-format file..."
+          DIFF=0
+          for FILE in $FILES; do
+            FORMATTING_DIFF=$(clang-format --style=file "$FILE" | diff -u "$FILE" - || true)
+            if [ -n "$FORMATTING_DIFF" ]; then
+              echo "File $FILE needs formatting"
+              echo "$FORMATTING_DIFF"
+              DIFF=1
+            fi
+          done
+
+          if [ $DIFF -eq 0 ]; then
+            echo "✅ All files are properly formatted"
+            exit 0
+          else
+            echo "❌ Some files need formatting. Run clang-format to fix."
+            exit 1
+          fi
+        else
+          # Apply formatting
+          echo "Applying clang-format to files using project .clang-format file..."
+          for FILE in $FILES; do
+            echo "Formatting $FILE"
+            clang-format -i --style=file "$FILE"
+          done
+          echo "✅ Formatting complete"
+
+          # If this is a PR with %reformat comment, commit and push changes
+          if [ "$REFORMAT" == "true" ] && [ -n "${GITHUB_HEAD_REF:-}" ]; then
+            git config --global user.name "GitHub Actions"
+            git config --global user.email "actions@github.com"
+            git add -u
+            git commit -m "Apply clang-format [automated]" || echo "No changes to commit"
+            git push origin HEAD:${GITHUB_HEAD_REF}
+            echo "Pushed formatting changes to PR branch"
+          fi
+        fi
+        EOL
+        chmod +x ${{ github.action_path }}/format.sh
+
+    - name: Run format check/apply
+      shell: bash
+      run: ${{ github.action_path }}/format.sh

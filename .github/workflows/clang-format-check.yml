@@ -1,0 +1,33 @@
+name: Clang Format Check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_call:
+    inputs:
+      include-pattern:
+        description: 'File pattern to include in formatting check'
+        required: false
+        type: string
+        default: '*.cpp *.hpp *.c *.h'
+
+jobs:
+  format-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+        
+    - name: Install clang-format
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-format
+        
+    - name: Check clang-format
+      run: |
+        chmod +x ./format.sh
+        ./format.sh --check ${{ inputs.include-pattern || '*.cpp *.hpp *.c *.h' }}
